@@ -13,6 +13,18 @@ const sudo = require('sudo-prompt');
 
 const NODE_ENV = process.env.NODE_ENV
 
+// 验证日期格式 yyyy/MM/dd
+function isValidDateFormat(dateStr) {
+    const regex = /^\d{4}\/\d{1,2}\/\d{1,2}$/;
+    if (!regex.test(dateStr)) return false;
+    
+    const [year, month, day] = dateStr.split('/').map(Number);
+    const date = new Date(year, month - 1, day);
+    return date.getFullYear() === year && 
+           date.getMonth() === month - 1 && 
+           date.getDate() === day;
+}
+
 function createWindow() {
     const win = new BrowserWindow({
         width: 300,
@@ -39,10 +51,13 @@ function executeCommand(command) {
             if (error) {
                 console.error(`exec error: ${error}`);
                 reject(error);
+                return;
+            }
+            console.log(`stdout: ${stdout}`);
+            if (stderr) {
+                console.error(`stderr: ${stderr}`);
             }
             resolve(stdout);
-            console.log(`stdout: ${stdout}`);
-            console.error(`stderr: ${stderr}`);
         });
     });
 }
@@ -59,6 +74,10 @@ app.whenReady().then(() => {
             if (time === 'now') {
                 command = 'w32tm /resync';
             } else {
+                // 验证日期格式
+                if (!isValidDateFormat(time)) {
+                    throw new Error('日期格式无效，请使用 yyyy/MM/dd 格式');
+                }
                 command = `date ${time}`;
             }
             return await executeCommand(command);
