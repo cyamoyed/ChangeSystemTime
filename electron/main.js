@@ -11,7 +11,7 @@ const {
 } = require('child_process');
 const sudo = require('sudo-prompt');
 
-const NODE_ENV = process.env.NODE_ENV
+const NODE_ENV = process.env.NODE_ENV;
 
 // 验证日期格式 yyyy/MM/dd
 function isValidDateFormat(dateStr) {
@@ -19,9 +19,15 @@ function isValidDateFormat(dateStr) {
     if (!regex.test(dateStr)) return false;
     
     const [year, month, day] = dateStr.split('/').map(Number);
+
+    // 范围校验
+    if (year < 1900 || year > 2100) return false;
+    if (month < 1 || month > 12) return false;
+    if (day < 1 || day > 31) return false;
+
     const date = new Date(year, month - 1, day);
-    return date.getFullYear() === year && 
-           date.getMonth() === month - 1 && 
+    return date.getFullYear() === year &&
+           date.getMonth() === month - 1 &&
            date.getDate() === day;
 }
 
@@ -43,7 +49,6 @@ function createWindow() {
         win.webContents.openDevTools();
     }
 }
-
 
 function executeCommand(command) {
     return new Promise((resolve, reject) => {
@@ -83,12 +88,8 @@ app.whenReady().then(() => {
             return await executeCommand(command);
         } catch (error) {
             if (time === 'now') {
-                try {
-                    await startTimeService();
-                    return await executeCommand('w32tm /resync');
-                } catch (e) {
-                    throw e;
-                }
+                await startTimeService();
+                return await executeCommand('w32tm /resync');
             } else {
                 throw error;
             }
