@@ -6,9 +6,6 @@ const {
     ipcMain
 } = require('electron');
 const path = require('path');
-const {
-    exec
-} = require('child_process');
 const sudo = require('sudo-prompt');
 
 const NODE_ENV = process.env.NODE_ENV;
@@ -36,7 +33,9 @@ function createWindow() {
         width: 300,
         height: 300,
         webPreferences: {
-            nodeIntegration: true,
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
             preload: path.join(__dirname, 'preload.js')
         }
     });
@@ -83,7 +82,8 @@ app.whenReady().then(() => {
                 if (!isValidDateFormat(time)) {
                     throw new Error('日期格式无效，请使用 yyyy/MM/dd 格式');
                 }
-                command = `date ${time}`;
+                const [year, month, day] = time.split('/');
+                command = `powershell -Command "Set-Date -Date '${year}-${month}-${day}'"`;
             }
             return await executeCommand(command);
         } catch (error) {
@@ -104,5 +104,5 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', function () {
-    if (process.platform !== 'darwin') app.quit();
+    app.quit();
 });

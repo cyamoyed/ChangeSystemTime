@@ -1,6 +1,6 @@
 {
   "name": "set-system-time",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "设置系统时间",
   "main": "electron/main.js",
   "scripts": {
@@ -12,25 +12,11 @@
   "license": "MIT",
   "devDependencies": {
     "@electron-forge/cli": "^6.4.1",
-    "@electron-forge/maker-deb": "^6.4.1",
-    "@electron-forge/maker-rpm": "^6.4.1",
     "@electron-forge/maker-squirrel": "^6.4.1",
     "@electron-forge/maker-zip": "^6.4.1",
     "@electron-forge/plugin-auto-unpack-natives": "^6.4.1",
     "electron": "^26.1.0",
-    "electron-builder": "^24.6.3",
     "electron-squirrel-startup": "^1.0.0"
-  },
-  "build": {
-    "asar": true,
-    "appId": "com.gykjcq.setTime",
-    "productName": "SetSystemTime",
-    "directories": {
-      "output": "dist"
-    },
-    "win": {
-      "target": "portable"
-    }
   },
   "dependencies": {
     "sudo-prompt": "^9.2.1"

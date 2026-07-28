@@ -1,3 +1,17 @@
+// 显示版本信息
+window.addEventListener('DOMContentLoaded', () => {
+    const replaceText = (selector, text) => {
+        const element = document.getElementById(selector);
+        if (element) element.innerText = text;
+    };
+
+    if (window.versions) {
+        replaceText('chrome-version', window.versions.chrome());
+        replaceText('node-version', window.versions.node());
+        replaceText('electron-version', window.versions.electron());
+    }
+});
+
 function showResult(message, isError = false) {
     if (isError) {
         alert('错误: ' + message);
