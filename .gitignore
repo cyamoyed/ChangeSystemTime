@@ -1,3 +1,18 @@
-.idea
-node_modules
-out
+# Go build output
+*.exe
+SetSystemTime
+*.syso
+
+# Go module cache
+go.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
