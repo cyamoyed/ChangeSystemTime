@@ -121,13 +121,16 @@ const (
 	SPI_GETWORKAREA = 0x0030
 	LOGPIXELSX      = 88
 
-	CMD_TIMEOUT = 15 * time.Second
+	scCmdTimeout     = 10 * time.Second // reg / sc 等快速命令
+	svcStopTimeout   = 30 * time.Second // 服务启停（net stop 可能较慢）
+	ntpResyncTimeout = 60 * time.Second // w32tm /resync 在服务忙时会阻塞较久，不能太短
 
 	// 基准尺寸（96 DPI 下的逻辑像素，按 DPI 缩放）
 	baseWinW = 480
 	baseWinH = 420
 
 	ntpClientRegKey = `HKLM\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\NtpClient`
+	w32ConfigRegKey = `HKLM\SYSTEM\CurrentControlSet\Services\W32Time\Config`
 )
 
 type SYSTEMTIME struct {
@@ -184,9 +187,6 @@ var (
 	asyncMu         sync.Mutex
 	asyncResultMsg  string
 	asyncResultCode int
-
-	w32Mu      sync.Mutex
-	w32Stopped bool
 )
 
 // ---- 提权 ----
@@ -319,54 +319,107 @@ func getModuleHandle() uintptr {
 	return ret
 }
 
-func runCmdWithTimeout(name string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), CMD_TIMEOUT)
+func runCmdWithTimeout(timeout time.Duration, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
-		return string(output), fmt.Errorf("命令超时 (%v): %s", CMD_TIMEOUT, name)
+		return string(output), fmt.Errorf("命令超时 (%v): %s", timeout, name)
 	}
 	return string(output), err
 }
 
-func setNTPAutoEnabled(enabled bool) {
-	val := "0"
-	if enabled {
-		val = "1"
+func setRegDWORD(key, name string, val uint32) error {
+	out, err := runCmdWithTimeout(scCmdTimeout, "reg", "add", key,
+		"/v", name, "/t", "REG_DWORD", "/d", fmt.Sprintf("%d", val), "/f")
+	if err != nil {
+		return fmt.Errorf("写入注册表失败 %s\\%s: %v\n%s", key, name, err, out)
 	}
-	runCmdWithTimeout("reg", "add", ntpClientRegKey, "/v", "Enabled", "/t", "REG_DWORD", "/d", val, "/f")
+	return nil
 }
 
-func markW32Stopped() {
-	w32Mu.Lock()
-	w32Stopped = true
-	w32Mu.Unlock()
-}
-
-func markW32Started() {
-	w32Mu.Lock()
-	w32Stopped = false
-	w32Mu.Unlock()
-}
-
-func restoreW32IfStopped() {
-	w32Mu.Lock()
-	need := w32Stopped
-	w32Stopped = false
-	w32Mu.Unlock()
-	if !need {
-		return
+// queryServiceState 返回 w32time 服务状态；查询失败时返回空串
+func queryServiceState() string {
+	out, err := runCmdWithTimeout(scCmdTimeout, "sc", "query", "w32time")
+	if err != nil {
+		return ""
 	}
-	setNTPAutoEnabled(true)
-	runCmdWithTimeout("net", "start", "w32time")
+	switch {
+	case strings.Contains(out, "RUNNING"):
+		return "RUNNING"
+	case strings.Contains(out, "STOP_PENDING"):
+		return "STOP_PENDING"
+	case strings.Contains(out, "START_PENDING"):
+		return "START_PENDING"
+	case strings.Contains(out, "STOPPED"):
+		return "STOPPED"
+	}
+	return "UNKNOWN"
+}
+
+// disableTimeSync 为设置假时间做准备：
+//  1. 关闭 NTP 客户端；
+//  2. 关闭安全时间种子（Secure Time Seeding）——它会用 TLS 缓存的“可信时间”
+//     在服务启动瞬间强行纠偏，即使 NTP 已禁用也会把时间拉回真实值；
+//  3. 把 w32time 设为“禁用”，阻止任何组件（触发器/按需启动/计划任务）再次拉起它；
+//  4. 停止服务并确认已 STOPPED。
+func disableTimeSync() error {
+	if err := setRegDWORD(ntpClientRegKey, "Enabled", 0); err != nil {
+		return err
+	}
+	if err := setRegDWORD(w32ConfigRegKey, "UtilizeSslTimeData", 0); err != nil {
+		return err
+	}
+	if out, err := runCmdWithTimeout(scCmdTimeout, "sc", "config", "w32time", "start=", "disabled"); err != nil {
+		return fmt.Errorf("禁用 w32time 服务自启失败: %v\n%s", err, out)
+	}
+	if state := queryServiceState(); state != "STOPPED" {
+		runCmdWithTimeout(svcStopTimeout, "net", "stop", "w32time")
+	}
+	for i := 0; i < 20; i++ {
+		if queryServiceState() == "STOPPED" {
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return fmt.Errorf("w32time 服务未能停止")
+}
+
+// enableTimeSync 恢复系统默认的时间同步能力
+func enableTimeSync() error {
+	if err := setRegDWORD(ntpClientRegKey, "Enabled", 1); err != nil {
+		return err
+	}
+	if err := setRegDWORD(w32ConfigRegKey, "UtilizeSslTimeData", 1); err != nil {
+		return err
+	}
+	if out, err := runCmdWithTimeout(scCmdTimeout, "sc", "config", "w32time", "start=", "demand"); err != nil {
+		return fmt.Errorf("恢复 w32time 启动方式失败: %v\n%s", err, out)
+	}
+	if queryServiceState() != "RUNNING" {
+		if out, err := runCmdWithTimeout(svcStopTimeout, "net", "start", "w32time"); err != nil {
+			return fmt.Errorf("启动 w32time 失败: %v\n%s", err, out)
+		}
+	}
 	waitW32Ready()
+	return nil
+}
+
+// restoreSyncConfigBestEffort 在设置时间失败时尽力把同步配置恢复原状（此时系统时间未被改动）
+func restoreSyncConfigBestEffort() {
+	setRegDWORD(ntpClientRegKey, "Enabled", 1)
+	setRegDWORD(w32ConfigRegKey, "UtilizeSslTimeData", 1)
+	runCmdWithTimeout(scCmdTimeout, "sc", "config", "w32time", "start=", "demand")
+	if queryServiceState() != "RUNNING" {
+		runCmdWithTimeout(svcStopTimeout, "net", "start", "w32time")
+	}
 }
 
 func waitW32Ready() {
 	for i := 0; i < 10; i++ {
-		out, err := runCmdWithTimeout("sc", "query", "w32time")
+		out, err := runCmdWithTimeout(scCmdTimeout, "sc", "query", "w32time")
 		if err == nil && containsRunning(out) {
 			return
 		}
@@ -379,9 +432,10 @@ func containsRunning(s string) bool {
 }
 
 func setSystemTime(year int, month time.Month, day int) error {
-	setNTPAutoEnabled(false)
-	runCmdWithTimeout("net", "stop", "w32time")
-	markW32Stopped()
+	if err := disableTimeSync(); err != nil {
+		restoreSyncConfigBestEffort()
+		return err
+	}
 
 	now := time.Now()
 	local := time.Date(year, month, day, now.Hour(), now.Minute(), now.Second(), now.Nanosecond(), time.Local)
@@ -394,22 +448,21 @@ func setSystemTime(year int, month time.Month, day int) error {
 	}
 	ret, _, err := pSetSystemTime.Call(uintptr(unsafe.Pointer(&st)))
 	if ret == 0 {
-		restoreW32IfStopped()
+		restoreSyncConfigBestEffort()
 		return fmt.Errorf("SetSystemTime 失败: %v", err)
 	}
 	return nil
 }
 
 func syncNTPTime() error {
-	setNTPAutoEnabled(true)
-	runCmdWithTimeout("net", "start", "w32time")
-	markW32Started()
-	waitW32Ready()
+	if err := enableTimeSync(); err != nil {
+		return err
+	}
 
 	var output string
 	var err error
 	for i := 0; i < 3; i++ {
-		output, err = runCmdWithTimeout("w32tm", "/resync", "/force")
+		output, err = runCmdWithTimeout(ntpResyncTimeout, "w32tm", "/resync", "/force")
 		if err == nil {
 			return nil
 		}
@@ -577,7 +630,8 @@ func cleanup() {
 		pDeleteObject.Call(hFont)
 		hFont = 0
 	}
-	restoreW32IfStopped()
+	// 退出时不能恢复 w32time：设置的假时间需要在程序关闭后继续生效，
+	// 恢复网络时间只能通过「恢复时间」按钮显式触发。
 }
 
 func createChild(hInst, parent uintptr, exStyle uintptr, class, text string, style uintptr, id uintptr, x, y, w, h int32) uintptr {
@@ -689,7 +743,8 @@ func main() {
 	pShowWindow.Call(hWndMain, SW_SHOW)
 	pUpdateWindow.Call(hWndMain)
 
-	appendLog("就绪。选择日期后点击「设置日期」；点击「恢复时间」可同步 NTP。")
+	appendLog("就绪。点击「设置日期」修改系统时间（会停用时间同步，程序退出后仍然保持）；")
+	appendLog("需要恢复真实时间时点击「恢复时间」重新同步 NTP。")
 
 	var msg MSG
 	for {
